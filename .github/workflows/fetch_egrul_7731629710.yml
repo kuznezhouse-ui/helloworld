@@ -1,0 +1,70 @@
+name: Temporary EGRUL lookup 7731629710
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch_egrul_7731629710.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch registry data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          curl -fsSL --retry 3 --retry-delay 2 'https://egrul.org/7731629710' -o out/egrul_org.html
+          python - <<'PY'
+          import json, time, requests
+          s = requests.Session()
+          s.headers.update({'User-Agent': 'Mozilla/5.0'})
+          r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
+          r.raise_for_status()
+          init = r.json()
+          open('out/fns_init.json','w',encoding='utf-8').write(json.dumps(init,ensure_ascii=False,indent=2))
+          token = init.get('t')
+          if not token:
+              raise RuntimeError(f'FNS token missing: {init}')
+          for _ in range(10):
+              rr = s.get(f'https://egrul.nalog.ru/search-result/{token}', timeout=30)
+              rr.raise_for_status()
+              try:
+                  data = rr.json()
+              except Exception:
+                  time.sleep(2)
+                  continue
+              if data.get('rows') is not None:
+                  break
+              time.sleep(2)
+          else:
+              raise RuntimeError('FNS search result timeout')
+          open('out/fns_search.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
+          rows = data.get('rows') or []
+          if rows:
+              dtok = rows[0].get('t')
+              if dtok:
+                  pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60)
+                  pdf.raise_for_status()
+                  open('out/fns_extract.pdf','wb').write(pdf.content)
+          PY
+          python - <<'PY'
+          from bs4 import BeautifulSoup
+          html=open('out/egrul_org.html',encoding='utf-8').read()
+          soup=BeautifulSoup(html,'html.parser')
+          text='\n'.join(line.strip() for line in soup.get_text('\n').splitlines() if line.strip())
+          open('out/egrul_org.txt','w',encoding='utf-8').write(text)
+          PY
+          if command -v pdftotext >/dev/null 2>&1 && [ -f out/fns_extract.pdf ]; then
+            pdftotext -layout out/fns_extract.pdf out/fns_extract.txt || true
+          fi
+      - name: Upload lookup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: egrul-7731629710
+          path: out/
+          retention-days: 1
