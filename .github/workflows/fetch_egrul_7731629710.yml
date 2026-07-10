@@ -17,53 +17,65 @@ jobs:
       - name: Fetch registry data
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           mkdir -p out
-          curl -fsSL --retry 3 --retry-delay 2 'https://egrul.org/7731629710' -o out/egrul_org.html
+          curl -L --retry 2 --retry-delay 1 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36' 'https://egrul.org/7731629710' -o out/egrul_org.html || true
           python - <<'PY'
-          import json, time, requests
+          import json, time, requests, traceback
           s = requests.Session()
-          s.headers.update({'User-Agent': 'Mozilla/5.0'})
-          r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
-          r.raise_for_status()
-          init = r.json()
-          open('out/fns_init.json','w',encoding='utf-8').write(json.dumps(init,ensure_ascii=False,indent=2))
-          token = init.get('t')
-          if not token:
-              raise RuntimeError(f'FNS token missing: {init}')
-          for _ in range(10):
-              rr = s.get(f'https://egrul.nalog.ru/search-result/{token}', timeout=30)
-              rr.raise_for_status()
-              try:
-                  data = rr.json()
-              except Exception:
+          s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36', 'Referer':'https://egrul.nalog.ru/'})
+          try:
+              r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
+              open('out/fns_post_status.txt','w').write(str(r.status_code)+'\n'+r.text[:2000])
+              r.raise_for_status()
+              init = r.json()
+              open('out/fns_init.json','w',encoding='utf-8').write(json.dumps(init,ensure_ascii=False,indent=2))
+              token = init.get('t')
+              if not token:
+                  raise RuntimeError(f'FNS token missing: {init}')
+              data = None
+              for _ in range(15):
+                  rr = s.get(f'https://egrul.nalog.ru/search-result/{token}', timeout=30)
+                  open('out/fns_search_status.txt','w').write(str(rr.status_code)+'\n'+rr.text[:2000])
+                  rr.raise_for_status()
+                  try:
+                      candidate = rr.json()
+                  except Exception:
+                      time.sleep(2)
+                      continue
+                  if candidate.get('rows') is not None:
+                      data = candidate
+                      break
                   time.sleep(2)
-                  continue
-              if data.get('rows') is not None:
-                  break
-              time.sleep(2)
-          else:
-              raise RuntimeError('FNS search result timeout')
-          open('out/fns_search.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
-          rows = data.get('rows') or []
-          if rows:
-              dtok = rows[0].get('t')
-              if dtok:
-                  pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60)
-                  pdf.raise_for_status()
-                  open('out/fns_extract.pdf','wb').write(pdf.content)
+              if data is None:
+                  raise RuntimeError('FNS search result timeout')
+              open('out/fns_search.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
+              rows = data.get('rows') or []
+              if rows:
+                  dtok = rows[0].get('t')
+                  if dtok:
+                      pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60)
+                      open('out/fns_download_status.txt','w').write(str(pdf.status_code)+' '+pdf.headers.get('content-type',''))
+                      pdf.raise_for_status()
+                      open('out/fns_extract.pdf','wb').write(pdf.content)
+          except Exception:
+              open('out/fns_error.txt','w',encoding='utf-8').write(traceback.format_exc())
           PY
           python - <<'PY'
-          from bs4 import BeautifulSoup
-          html=open('out/egrul_org.html',encoding='utf-8').read()
-          soup=BeautifulSoup(html,'html.parser')
-          text='\n'.join(line.strip() for line in soup.get_text('\n').splitlines() if line.strip())
-          open('out/egrul_org.txt','w',encoding='utf-8').write(text)
+          import os, re
+          p='out/egrul_org.html'
+          if os.path.exists(p):
+              html=open(p,encoding='utf-8',errors='ignore').read()
+              text=re.sub(r'<script.*?</script>|<style.*?</style>',' ',html,flags=re.S|re.I)
+              text=re.sub(r'<[^>]+>','\n',text)
+              text=re.sub(r'\n\s*\n+','\n',text)
+              open('out/egrul_org.txt','w',encoding='utf-8').write(text)
           PY
           if command -v pdftotext >/dev/null 2>&1 && [ -f out/fns_extract.pdf ]; then
             pdftotext -layout out/fns_extract.pdf out/fns_extract.txt || true
           fi
       - name: Upload lookup artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: egrul-7731629710
