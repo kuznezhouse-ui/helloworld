@@ -1,9 +1,6 @@
 name: Temporary EGRUL lookup 7731629710
 
 on:
-  push:
-    paths:
-      - '.github/workflows/fetch_egrul_7731629710.yml'
   pull_request:
   workflow_dispatch:
 
@@ -14,7 +11,7 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch registry data
+      - name: Fetch official EGRUL extract
         shell: bash
         run: |
           set -u
@@ -31,7 +28,6 @@ jobs:
           })
           try:
               r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
-              open('out/fns_post_status.txt','w').write(str(r.status_code)+'\n'+r.text[:2000])
               r.raise_for_status()
               init = r.json()
               open('out/fns_init.json','w',encoding='utf-8').write(json.dumps(init,ensure_ascii=False,indent=2))
@@ -39,36 +35,56 @@ jobs:
               if not token:
                   raise RuntimeError(f'FNS token missing: {init}')
               data = None
-              for _ in range(15):
+              for _ in range(20):
                   rr = s.get(f'https://egrul.nalog.ru/search-result/{token}', timeout=30)
-                  open('out/fns_search_status.txt','w').write(str(rr.status_code)+'\n'+rr.text[:2000])
                   rr.raise_for_status()
                   try:
                       candidate = rr.json()
                   except Exception:
-                      time.sleep(2)
+                      time.sleep(1.5)
                       continue
                   if candidate.get('rows') is not None:
                       data = candidate
                       break
-                  time.sleep(2)
+                  time.sleep(1.5)
               if data is None:
                   raise RuntimeError('FNS search result timeout')
               open('out/fns_search.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
               rows = data.get('rows') or []
-              if rows:
-                  dtok = rows[0].get('t')
-                  if dtok:
-                      attempts=[]
-                      for i in range(20):
-                          time.sleep(3 if i else 1)
-                          pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60, headers={'Accept':'application/pdf,application/octet-stream,*/*'})
-                          ct=pdf.headers.get('content-type','')
-                          attempts.append({'attempt':i+1,'status':pdf.status_code,'content_type':ct,'length':len(pdf.content),'preview':pdf.text[:300] if 'text' in ct else ''})
-                          if pdf.status_code == 200 and pdf.content.startswith(b'%PDF'):
-                              open('out/fns_extract.pdf','wb').write(pdf.content)
-                              break
-                      open('out/fns_download_attempts.json','w',encoding='utf-8').write(json.dumps(attempts,ensure_ascii=False,indent=2))
+              if not rows:
+                  raise RuntimeError('No FNS search rows')
+              file_token = rows[0].get('t')
+              if not file_token:
+                  raise RuntimeError('No extract token in FNS row')
+              ts = int(time.time()*1000)
+              vr = s.get(f'https://egrul.nalog.ru/vyp-request/{file_token}?r=&_={ts}', timeout=30)
+              open('out/vyp_request.json','w',encoding='utf-8').write(vr.text)
+              vr.raise_for_status()
+              ready = False
+              statuses=[]
+              for _ in range(60):
+                  ts = int(time.time()*1000)
+                  st = s.get(f'https://egrul.nalog.ru/vyp-status/{file_token}?r={ts}&_={ts}', timeout=30)
+                  statuses.append({'status_code':st.status_code,'body':st.text[:500]})
+                  st.raise_for_status()
+                  try:
+                      status_data=st.json()
+                  except Exception:
+                      status_data={}
+                  if status_data.get('status') == 'ready':
+                      ready=True
+                      break
+                  time.sleep(2)
+              open('out/vyp_statuses.json','w',encoding='utf-8').write(json.dumps(statuses,ensure_ascii=False,indent=2))
+              if not ready:
+                  raise RuntimeError('Extract did not become ready')
+              pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{file_token}', timeout=60, headers={'Accept':'application/pdf,application/octet-stream,*/*'})
+              open('out/download_status.txt','w').write(str(pdf.status_code)+' '+pdf.headers.get('content-type','')+' '+str(len(pdf.content)))
+              pdf.raise_for_status()
+              if not pdf.content.startswith(b'%PDF'):
+                  open('out/download_body.bin','wb').write(pdf.content)
+                  raise RuntimeError('Downloaded content is not PDF')
+              open('out/fns_extract.pdf','wb').write(pdf.content)
           except Exception:
               open('out/fns_error.txt','w',encoding='utf-8').write(traceback.format_exc())
           PY
