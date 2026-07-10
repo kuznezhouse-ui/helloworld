@@ -1,4 +1,4 @@
-name: Temporary profiles lookup 7731629710
+name: Temporary BFO lookup 7731629710
 
 on:
   pull_request:
@@ -11,60 +11,43 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch profiles and accounting data
+      - name: Fetch official BFO data
         shell: bash
         run: |
           set -u
           mkdir -p out
           python - <<'PY'
-          import requests, re, html, json, traceback
-          urls={
-            'rbc_company':'https://companies.rbc.ru/id/1097746347797-ooo-nauchno-proizvodstvennoe-obschestvo-yumas/',
-            'rbc_alexey':'https://companies.rbc.ru/persons/inn/773127700732/',
-            'rbc_yuri':'https://companies.rbc.ru/persons/inn/773172638959/',
-            'rbc_predecessor':'https://companies.rbc.ru/id/1047796229447-obschestvo-s-ogranichennoj-otvetstvennostyu-nauchno-proizvodstvennoe-obedinenie-yumas/',
-            'checko_company':'https://checko.ru/company/npo-yumas-1097746347797',
-            'fedresurs_company':'https://fedresurs.ru/companies?searchString=7731629710',
-            'bo_search':'https://bo.nalog.ru/advanced-search/organizations/search?query=7731629710&page=0'
-          }
-          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36','Accept-Language':'ru-RU,ru;q=0.9,en;q=0.8'})
+          import requests,json,re,traceback
+          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36','Accept':'application/json, text/plain, */*','Referer':'https://bo.nalog.gov.ru/'})
           status={}
-          for key,url in urls.items():
+          candidates=[
+            'https://bo.nalog.gov.ru/advanced-search/organizations/search',
+            'https://bo.nalog.gov.ru/api/advanced-search/organizations/search',
+            'https://bo.nalog.gov.ru/nbo/organizations/search'
+          ]
+          for idx,url in enumerate(candidates):
             try:
-              r=s.get(url,timeout=90,allow_redirects=True)
-              status[key]={'url':r.url,'status':r.status_code,'content_type':r.headers.get('content-type',''),'length':len(r.content)}
-              open(f'out/{key}.bin','wb').write(r.content)
-              ct=r.headers.get('content-type','')
-              if 'json' in ct:
-                try:
-                  obj=r.json(); open(f'out/{key}.json','w',encoding='utf-8').write(json.dumps(obj,ensure_ascii=False,indent=2))
-                  if key=='bo_search':
-                    items=obj.get('content') or obj.get('results') or obj.get('data') or []
-                    if isinstance(items,dict): items=items.get('content') or items.get('data') or []
-                    if items:
-                      item=items[0]
-                      bid=item.get('id') or item.get('organizationId') or item.get('bfoId')
-                      if bid:
-                        for suffix,name in [(f'/nbo/organizations/{bid}','bo_summary'),(f'/nbo/organizations/{bid}/bfo','bo_bfo')]:
-                          z=s.get('https://bo.nalog.ru'+suffix,timeout=90); status[name]={'status':z.status_code,'length':len(z.content)}
-                          open(f'out/{name}.json','w',encoding='utf-8').write(json.dumps(z.json(),ensure_ascii=False,indent=2))
-                except Exception:
-                  pass
-              if 'html' in ct or b'<html' in r.content[:1000].lower():
-                text=r.content.decode('utf-8','ignore')
-                text=re.sub(r'(?is)<script.*?</script>|<style.*?</style>|<noscript.*?</noscript>',' ',text)
-                text=re.sub(r'(?s)<[^>]+>','\n',text)
-                text=html.unescape(text)
-                text='\n'.join(x.strip() for x in text.splitlines() if x.strip())
-                open(f'out/{key}.txt','w',encoding='utf-8').write(text)
-            except Exception:
-              status[key]={'error':traceback.format_exc()}
+              r=s.get(url,params={'query':'7731629710','page':'0'},timeout=90,allow_redirects=True)
+              status[str(idx)]={'url':r.url,'status':r.status_code,'ct':r.headers.get('content-type',''),'len':len(r.content)}
+              open(f'out/candidate_{idx}.bin','wb').write(r.content)
+              try: open(f'out/candidate_{idx}.json','w',encoding='utf-8').write(json.dumps(r.json(),ensure_ascii=False,indent=2))
+              except Exception: pass
+            except Exception: status[str(idx)]={'error':traceback.format_exc()}
+          # inspect frontend JS for API paths
+          try:
+            h=s.get('https://bo.nalog.gov.ru/',timeout=90); txt=h.text
+            m=re.findall(r'<script[^>]+src=["\']([^"\']+)',txt)
+            status['scripts']=m
+            for j,src in enumerate(m):
+              if src.startswith('/'): src='https://bo.nalog.gov.ru'+src
+              z=s.get(src,timeout=90); open(f'out/script_{j}.js','wb').write(z.content)
+          except Exception: status['script_error']=traceback.format_exc()
           open('out/status.json','w',encoding='utf-8').write(json.dumps(status,ensure_ascii=False,indent=2))
           PY
       - name: Upload lookup artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: profiles-7731629710
+          name: bfo-7731629710
           path: out/
           retention-days: 1
