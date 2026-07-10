@@ -19,11 +19,16 @@ jobs:
         run: |
           set -u
           mkdir -p out
-          curl -L --retry 2 --retry-delay 1 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36' 'https://egrul.org/7731629710' -o out/egrul_org.html || true
           python - <<'PY'
           import json, time, requests, traceback
           s = requests.Session()
-          s.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36', 'Referer':'https://egrul.nalog.ru/'})
+          s.headers.update({
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36',
+              'Referer':'https://egrul.nalog.ru/index.html',
+              'Origin':'https://egrul.nalog.ru',
+              'Accept':'application/json, text/javascript, */*; q=0.01',
+              'X-Requested-With':'XMLHttpRequest'
+          })
           try:
               r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
               open('out/fns_post_status.txt','w').write(str(r.status_code)+'\n'+r.text[:2000])
@@ -54,22 +59,18 @@ jobs:
               if rows:
                   dtok = rows[0].get('t')
                   if dtok:
-                      pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60)
-                      open('out/fns_download_status.txt','w').write(str(pdf.status_code)+' '+pdf.headers.get('content-type',''))
-                      pdf.raise_for_status()
-                      open('out/fns_extract.pdf','wb').write(pdf.content)
+                      attempts=[]
+                      for i in range(20):
+                          time.sleep(3 if i else 1)
+                          pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{dtok}', timeout=60, headers={'Accept':'application/pdf,application/octet-stream,*/*'})
+                          ct=pdf.headers.get('content-type','')
+                          attempts.append({'attempt':i+1,'status':pdf.status_code,'content_type':ct,'length':len(pdf.content),'preview':pdf.text[:300] if 'text' in ct else ''})
+                          if pdf.status_code == 200 and pdf.content.startswith(b'%PDF'):
+                              open('out/fns_extract.pdf','wb').write(pdf.content)
+                              break
+                      open('out/fns_download_attempts.json','w',encoding='utf-8').write(json.dumps(attempts,ensure_ascii=False,indent=2))
           except Exception:
               open('out/fns_error.txt','w',encoding='utf-8').write(traceback.format_exc())
-          PY
-          python - <<'PY'
-          import os, re
-          p='out/egrul_org.html'
-          if os.path.exists(p):
-              html=open(p,encoding='utf-8',errors='ignore').read()
-              text=re.sub(r'<script.*?</script>|<style.*?</style>',' ',html,flags=re.S|re.I)
-              text=re.sub(r'<[^>]+>','\n',text)
-              text=re.sub(r'\n\s*\n+','\n',text)
-              open('out/egrul_org.txt','w',encoding='utf-8').write(text)
           PY
           if command -v pdftotext >/dev/null 2>&1 && [ -f out/fns_extract.pdf ]; then
             pdftotext -layout out/fns_extract.pdf out/fns_extract.txt || true
