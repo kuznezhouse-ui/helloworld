@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/fetch_egrul_7731629710.yml'
+  pull_request:
   workflow_dispatch:
 
 permissions:
