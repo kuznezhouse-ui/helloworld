@@ -1,4 +1,4 @@
-name: Temporary EGRUL lookup 7731629710
+name: Temporary FNS lookup 7731629710
 
 on:
   pull_request:
@@ -11,90 +11,109 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch official EGRUL extract
+      - name: Fetch official FNS data
         shell: bash
         run: |
           set -u
           mkdir -p out
           python - <<'PY'
           import json, time, requests, traceback
-          s = requests.Session()
-          s.headers.update({
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36',
-              'Referer':'https://egrul.nalog.ru/index.html',
-              'Origin':'https://egrul.nalog.ru',
-              'Accept':'application/json, text/javascript, */*; q=0.01',
-              'X-Requested-With':'XMLHttpRequest'
-          })
+
+          def dump(name, obj):
+              if isinstance(obj, (dict,list)):
+                  text=json.dumps(obj,ensure_ascii=False,indent=2)
+              else:
+                  text=str(obj)
+              open('out/'+name,'w',encoding='utf-8').write(text)
+
+          s=requests.Session()
+          s.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36'})
+
+          # Official EGRUL search and extract
           try:
-              r = s.post('https://egrul.nalog.ru/', data={'query':'7731629710','region':'','PreventChromeAutocomplete':''}, timeout=30)
-              r.raise_for_status()
-              init = r.json()
-              open('out/fns_init.json','w',encoding='utf-8').write(json.dumps(init,ensure_ascii=False,indent=2))
-              token = init.get('t')
-              if not token:
-                  raise RuntimeError(f'FNS token missing: {init}')
-              data = None
-              for _ in range(20):
-                  rr = s.get(f'https://egrul.nalog.ru/search-result/{token}', timeout=30)
+              for attempt in range(6):
+                  try:
+                      r=s.post('https://egrul.nalog.ru/',data={'query':'7731629710','region':'','PreventChromeAutocomplete':''},timeout=45)
+                      r.raise_for_status(); init=r.json(); break
+                  except Exception:
+                      if attempt==5: raise
+                      time.sleep(4)
+              dump('egrul_init.json',init)
+              token=init['t']; data=None
+              for _ in range(30):
+                  rr=s.get(f'https://egrul.nalog.ru/search-result/{token}',timeout=45)
                   rr.raise_for_status()
-                  try:
-                      candidate = rr.json()
-                  except Exception:
-                      time.sleep(1.5)
-                      continue
+                  try: candidate=rr.json()
+                  except Exception: candidate={}
                   if candidate.get('rows') is not None:
-                      data = candidate
-                      break
-                  time.sleep(1.5)
-              if data is None:
-                  raise RuntimeError('FNS search result timeout')
-              open('out/fns_search.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))
-              rows = data.get('rows') or []
-              if not rows:
-                  raise RuntimeError('No FNS search rows')
-              file_token = rows[0].get('t')
-              if not file_token:
-                  raise RuntimeError('No extract token in FNS row')
-              ts = int(time.time()*1000)
-              vr = s.get(f'https://egrul.nalog.ru/vyp-request/{file_token}?r=&_={ts}', timeout=30)
-              open('out/vyp_request.json','w',encoding='utf-8').write(vr.text)
-              vr.raise_for_status()
-              ready = False
-              statuses=[]
-              for _ in range(60):
-                  ts = int(time.time()*1000)
-                  st = s.get(f'https://egrul.nalog.ru/vyp-status/{file_token}?r={ts}&_={ts}', timeout=30)
-                  statuses.append({'status_code':st.status_code,'body':st.text[:500]})
-                  st.raise_for_status()
-                  try:
-                      status_data=st.json()
-                  except Exception:
-                      status_data={}
-                  if status_data.get('status') == 'ready':
-                      ready=True
-                      break
+                      data=candidate; break
                   time.sleep(2)
-              open('out/vyp_statuses.json','w',encoding='utf-8').write(json.dumps(statuses,ensure_ascii=False,indent=2))
-              if not ready:
-                  raise RuntimeError('Extract did not become ready')
-              pdf = s.get(f'https://egrul.nalog.ru/vyp-download/{file_token}', timeout=60, headers={'Accept':'application/pdf,application/octet-stream,*/*'})
-              open('out/download_status.txt','w').write(str(pdf.status_code)+' '+pdf.headers.get('content-type','')+' '+str(len(pdf.content)))
-              pdf.raise_for_status()
-              if not pdf.content.startswith(b'%PDF'):
-                  open('out/download_body.bin','wb').write(pdf.content)
-                  raise RuntimeError('Downloaded content is not PDF')
-              open('out/fns_extract.pdf','wb').write(pdf.content)
+              if data is None: raise RuntimeError('EGRUL search timeout')
+              dump('egrul_search.json',data)
+              row=data['rows'][0]; ft=row['t']; ts=int(time.time()*1000)
+              vr=s.get(f'https://egrul.nalog.ru/vyp-request/{ft}?r=&_={ts}',timeout=45)
+              dump('egrul_vyp_request.txt',str(vr.status_code)+'\n'+vr.text); vr.raise_for_status()
+              statuses=[]
+              for _ in range(90):
+                  ts=int(time.time()*1000)
+                  st=s.get(f'https://egrul.nalog.ru/vyp-status/{ft}?r={ts}&_={ts}',timeout=45)
+                  statuses.append({'http':st.status_code,'body':st.text[:500]})
+                  st.raise_for_status()
+                  try: sd=st.json()
+                  except Exception: sd={}
+                  if sd.get('status')=='ready': break
+                  time.sleep(2)
+              dump('egrul_vyp_status.json',statuses)
+              pdf=s.get(f'https://egrul.nalog.ru/vyp-download/{ft}',timeout=90)
+              dump('egrul_download_status.txt',f'{pdf.status_code} {pdf.headers.get("content-type","")} {len(pdf.content)}')
+              if pdf.status_code==200 and pdf.content.startswith(b'%PDF'):
+                  open('out/egrul_extract.pdf','wb').write(pdf.content)
+              else:
+                  open('out/egrul_download_body.bin','wb').write(pdf.content)
           except Exception:
-              open('out/fns_error.txt','w',encoding='utf-8').write(traceback.format_exc())
+              dump('egrul_error.txt',traceback.format_exc())
+
+          # Official Transparent Business company data
+          try:
+              pb=requests.Session()
+              pb.headers.update({'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136 Safari/537.36','Referer':'https://pb.nalog.ru/','Origin':'https://pb.nalog.ru','X-Requested-With':'XMLHttpRequest'})
+              search_payload={'page':'1','pageSize':'10','pbCaptchaToken':'','token':'','mode':'search-ul','queryAll':'','queryUl':'7731629710','okvedUl':'','statusUl':'','regionUl':'','isMspUl':'','queryIp':'','okvedIp':'','statusIp':'','regionIp':'','isMspIp':'','mspIp1':'1','mspIp2':'2','mspIp3':'3','queryUpr':'','uprType1':'1','uprType0':'1','queryRdl':'','dateRdl':'','queryAddr':'','regionAddr':'','queryOgr':'','ogrFl':'1','ogrUl':'1','npTypeDoc':'1','ogrnUlDoc':'','ogrnIpDoc':'','nameUlDoc':'','nameIpDoc':'','formUlDoc':'','formIpDoc':'','ifnsDoc':'','dateFromDoc':'','dateToDoc':''}
+              sr=pb.post('https://pb.nalog.ru/search-proc.json',data=search_payload,timeout=60)
+              dump('pb_search_status.txt',str(sr.status_code)+'\n'+sr.text[:2000]); sr.raise_for_status(); sj=sr.json(); dump('pb_search.json',sj)
+              org_token=sj['ul']['data'][0]['token']
+              gr=pb.post('https://pb.nalog.ru/company-proc.json',data={'token':org_token,'method':'get-request','pbCaptchaToken':''},timeout=60)
+              dump('pb_get_request.txt',str(gr.status_code)+'\n'+gr.text); gr.raise_for_status(); gj=gr.json()
+              result=None
+              for _ in range(40):
+                  resp=pb.post('https://pb.nalog.ru/company-proc.json',data={'token':gj['token'],'id':gj['id'],'method':'get-response'},timeout=60)
+                  if resp.status_code==200 and len(resp.text)>10:
+                      try:
+                          result=resp.json()
+                          if result: break
+                      except Exception: pass
+                  time.sleep(2)
+              if result is None: raise RuntimeError('PB company response timeout')
+              dump('pb_company.json',result)
+
+              # Search legal entities by current head/founder names and personal INNs.
+              persons=[('alexey_name','Мулёв Алексей Юрьевич'),('alexey_inn','773127700732'),('yuri_name','Мулев Юрий Владимирович'),('yuri_inn','773172638959')]
+              for key,q in persons:
+                  pp=dict(search_payload); pp.update({'mode':'search-upr','queryUl':'','queryUpr':q,'uprType1':'1','uprType0':'1'})
+                  pr=pb.post('https://pb.nalog.ru/search-proc.json',data=pp,timeout=60)
+                  dump(f'pb_person_{key}_status.txt',str(pr.status_code)+'\n'+pr.text[:2000])
+                  if pr.status_code==200:
+                      try: dump(f'pb_person_{key}.json',pr.json())
+                      except Exception: pass
+          except Exception:
+              dump('pb_error.txt',traceback.format_exc())
           PY
-          if command -v pdftotext >/dev/null 2>&1 && [ -f out/fns_extract.pdf ]; then
-            pdftotext -layout out/fns_extract.pdf out/fns_extract.txt || true
+          if command -v pdftotext >/dev/null 2>&1 && [ -f out/egrul_extract.pdf ]; then
+            pdftotext -layout out/egrul_extract.pdf out/egrul_extract.txt || true
           fi
       - name: Upload lookup artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: egrul-7731629710
+          name: fns-7731629710
           path: out/
           retention-days: 1
